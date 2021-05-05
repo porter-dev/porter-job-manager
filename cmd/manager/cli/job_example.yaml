@@ -1,0 +1,18 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-job
+spec:
+  template:
+    spec:
+      shareProcessNamespace: true
+      serviceAccountName: job-manager
+      containers:
+      - name: hello
+        image: bitnami/kubectl:latest
+        imagePullPolicy: Always
+        command: 
+        - "kubectl"
+        - "get"
+        - "jobs"
+      restartPolicy: OnFailure
