@@ -71,11 +71,15 @@ func RemoveAllJobs(opts *RemoveAllOpts, clientset *kubernetes.Clientset) error {
 		return err
 	}
 
+	propPolicy := metav1.DeletePropagationBackground
+
 	for _, job := range matchingJobs.Items {
 		err = clientset.BatchV1().Jobs(namespace).Delete(
 			context.Background(),
 			job.Name,
-			metav1.DeleteOptions{},
+			metav1.DeleteOptions{
+				PropagationPolicy: &propPolicy,
+			},
 		)
 
 		if err != nil {
