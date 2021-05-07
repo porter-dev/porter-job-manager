@@ -63,6 +63,8 @@ func ReadJobSpec(bytesPath string) (*batchv1.Job, error) {
 type CreateOpts struct {
 	ImagePullSecrets []string `env:"IMAGE_PULL_SECRETS"`
 	JobTemplatePath  string   `env:"JOB_TEMPLATE_PATH"`
+	LabelSelector    string   `env:"LABEL_SELECTOR"`
+	AllowConcurrency bool     `env:"ALLOW_CONCURRENCY"`
 }
 
 func CreateOptsFromEnv() (*CreateOpts, error) {
@@ -82,6 +84,34 @@ func CreateJob(opts *CreateOpts, clientset *kubernetes.Clientset) (*batchv1.Job,
 		return nil, err
 	}
 
+	namespace := job.GetObjectMeta().GetNamespace()
+
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	// If concurrency is not allowed, check for an active Job. If a job is currently active,
+	// return without running the job
+	if !opts.AllowConcurrency {
+		jobs, err := clientset.BatchV1().Jobs(namespace).List(
+			context.Background(),
+			metav1.ListOptions{
+				LabelSelector: opts.LabelSelector,
+			},
+		)
+
+		if err != nil {
+			return nil, err
+		}
+
+		for _, job := range jobs.Items {
+			// if any jobs are active, return without error
+			if job.Status.Active > 0 {
+				return nil, nil
+			}
+		}
+	}
+
 	// if image pull secrets are passed in, add them to the pod spec
 	if len(opts.ImagePullSecrets) > 0 {
 		for _, imagePullSecret := range opts.ImagePullSecrets {
@@ -89,12 +119,6 @@ func CreateJob(opts *CreateOpts, clientset *kubernetes.Clientset) (*batchv1.Job,
 				Name: imagePullSecret,
 			})
 		}
-	}
-
-	namespace := job.GetObjectMeta().GetNamespace()
-
-	if namespace == "" {
-		namespace = "default"
 	}
 
 	return clientset.BatchV1().Jobs(namespace).Create(
