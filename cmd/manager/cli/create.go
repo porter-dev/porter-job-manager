@@ -93,21 +93,34 @@ func CreateJob(opts *CreateOpts, clientset *kubernetes.Clientset) (*batchv1.Job,
 	// If concurrency is not allowed, check for an active Job. If a job is currently active,
 	// return without running the job
 	if !opts.AllowConcurrency {
-		jobs, err := clientset.BatchV1().Jobs(namespace).List(
-			context.Background(),
-			metav1.ListOptions{
-				LabelSelector: opts.LabelSelector,
-			},
-		)
+		continueVal := ""
 
-		if err != nil {
-			return nil, err
-		}
+		for {
+			jobs, err := clientset.BatchV1().Jobs(namespace).List(
+				context.Background(),
+				metav1.ListOptions{
+					LabelSelector: opts.LabelSelector,
+					Limit:         25,
+					Continue:      continueVal,
+				},
+			)
 
-		for _, job := range jobs.Items {
-			// if any jobs are active, return without error
-			if job.Status.Active > 0 {
-				return nil, nil
+			if err != nil {
+				return nil, err
+			}
+
+			for _, job := range jobs.Items {
+				// if any jobs are active, return without error
+				if job.Status.Active > 0 {
+					return nil, nil
+				}
+			}
+
+			if continueVal == "" && jobs.Continue != "" {
+				continueVal = jobs.Continue
+			} else {
+				// we have reached the end of the list of jobs
+				break
 			}
 		}
 	}
