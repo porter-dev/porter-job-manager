@@ -119,7 +119,7 @@ func CreateJob(opts *CreateOpts, clientset *kubernetes.Clientset) (*batchv1.Job,
 			if jobs.Continue == "" {
 				// we have reached the end of the list of jobs
 				break
-			} else if continueVal == "" {
+			} else {
 				// start pagination
 				continueVal = jobs.Continue
 			}
