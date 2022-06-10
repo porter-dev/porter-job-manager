@@ -111,7 +111,7 @@ func CreateJob(opts *CreateOpts, clientset *kubernetes.Clientset) (*batchv1.Job,
 
 			for _, job := range jobs.Items {
 				// if any jobs are active, return without error
-				if job.Status.Active > 0 {
+				if job.Status.Active > 0 && job.Status.Succeeded == 0 {
 					return nil, nil
 				}
 			}
