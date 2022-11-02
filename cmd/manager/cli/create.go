@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"log"
 	"sort"
-	"sync"
 
 	"github.com/joeshaw/envdecode"
 	"github.com/spf13/cobra"
@@ -29,13 +28,13 @@ var createCmd = &cobra.Command{
 
 		exitChan := make(chan struct{}, 1)
 
-		go cleanupJobs(clientset, exitChan)
-
 		opts, err := CreateOptsFromEnv()
 
 		if err != nil {
 			panic(err.Error())
 		}
+
+		go cleanupJobs(clientset, opts, exitChan)
 
 		_, err = CreateJob(opts, clientset)
 
@@ -151,142 +150,78 @@ func CreateJob(opts *CreateOpts, clientset *kubernetes.Clientset) (*batchv1.Job,
 	)
 }
 
-func cleanupJobs(clientset *kubernetes.Clientset, exitChan chan struct{}) {
+func cleanupJobs(clientset *kubernetes.Clientset, opts *CreateOpts, exitChan chan struct{}) {
 	log.Println("deleting older job runs, if any")
 
-	var namespaces []string
-	var continueStr string
-	retry := 0
+	job, err := ReadJobSpec(opts.JobTemplatePath)
 
-	for retry < 3 {
-		nsList, err := clientset.CoreV1().Namespaces().List(
-			context.Background(), metav1.ListOptions{
-				Continue: continueStr,
+	if err != nil {
+		log.Printf("error reading job spec: %s\n", err.Error())
+		exitChan <- struct{}{}
+	}
+
+	namespace := job.GetObjectMeta().GetNamespace()
+
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	var continueStr string
+	var failedJobs []batchv1.Job
+	var succeededJobs []batchv1.Job
+
+	for {
+		jobs, err := clientset.BatchV1().Jobs(namespace).List(
+			context.Background(),
+			metav1.ListOptions{
+				LabelSelector: opts.LabelSelector,
+				Continue:      continueStr,
 			},
 		)
 
 		if err != nil {
-			retry += 1
-			continue
+			log.Printf("error listing jobs: %s\n", err.Error())
+			exitChan <- struct{}{}
 		}
 
-		for _, ns := range nsList.Items {
-			namespaces = append(namespaces, ns.Name)
+		for _, job := range jobs.Items {
+			if job.Status.Failed > 0 {
+				failedJobs = append(failedJobs, job)
+			} else if job.Status.Succeeded > 0 {
+				succeededJobs = append(succeededJobs, job)
+			}
 		}
 
-		if nsList.Continue == "" {
+		if jobs.Continue == "" {
+			// we have reached the end of the list of jobs
 			break
 		} else {
-			continueStr = nsList.Continue
+			// start pagination
+			continueStr = jobs.Continue
 		}
 	}
 
-	var jobs []batchv1.Job
-	var mutex sync.RWMutex
-	var wg sync.WaitGroup
+	if len(failedJobs) > 20 {
+		sort.SliceStable(failedJobs, func(i, j int) bool {
+			return failedJobs[i].Status.CompletionTime.After(failedJobs[j].Status.CompletionTime.Time)
+		})
 
-	wg.Add(len(namespaces))
-
-	for _, ns := range namespaces {
-		go func(namespace string) {
-			defer wg.Done()
-
-			var continueStr string
-			retry := 0
-
-			for retry < 3 {
-				jobsList, err := clientset.BatchV1().Jobs(namespace).List(context.Background(), metav1.ListOptions{
-					Continue: continueStr,
-				})
-
-				if err != nil {
-					retry += 1
-					continue
-				}
-
-				mutex.Lock()
-				jobs = append(jobs, jobsList.Items...)
-				mutex.Unlock()
-
-				if jobsList.Continue == "" {
-					break
-				} else {
-					continueStr = jobsList.Continue
-				}
-			}
-		}(ns)
+		for _, job := range failedJobs[20:] {
+			// we ignore the error in this case because we do not want to fail the job manager
+			clientset.BatchV1().Jobs(job.Namespace).Delete(context.Background(), job.Name, metav1.DeleteOptions{})
+		}
 	}
 
-	wg.Wait()
+	if len(succeededJobs) > 20 {
+		sort.SliceStable(succeededJobs, func(i, j int) bool {
+			return succeededJobs[i].Status.CompletionTime.After(succeededJobs[j].Status.CompletionTime.Time)
+		})
 
-	jobReleases := make(map[string][]batchv1.Job)
-
-	for _, job := range jobs {
-		jobReleaseName := job.Labels["meta.helm.sh/release-name"]
-
-		if jobReleaseName == "" {
-			// fallback to app.kubernetes.io/instance label
-			jobReleaseName = job.Labels["app.kubernetes.io/instance"]
+		for _, job := range succeededJobs[20:] {
+			// we ignore the error in this case because we do not want to fail the job manager
+			clientset.BatchV1().Jobs(job.Namespace).Delete(context.Background(), job.Name, metav1.DeleteOptions{})
 		}
-
-		if jobReleaseName == "" {
-			// ignore this job because we could not discern the release name
-			continue
-		}
-
-		if _, ok := jobReleases[jobReleaseName]; !ok {
-			jobReleases[jobReleaseName] = make([]batchv1.Job, 0)
-		}
-
-		jobReleases[jobReleaseName] = append(jobReleases[jobReleaseName], job)
 	}
-
-	wg.Add(len(jobReleases))
-
-	for _, jobs := range jobReleases {
-		go func(jobs []batchv1.Job) {
-			defer wg.Done()
-
-			var failedJobs []batchv1.Job
-			var succeededJobs []batchv1.Job
-
-			for _, job := range jobs {
-				if job.Status.Active > 0 {
-					continue
-				}
-
-				if job.Status.Succeeded > 0 && job.Status.CompletionTime != nil {
-					succeededJobs = append(succeededJobs, job)
-				} else if job.Status.Failed > 0 && job.Status.CompletionTime != nil {
-					failedJobs = append(failedJobs, job)
-				}
-			}
-
-			if len(failedJobs) > 20 {
-				sort.SliceStable(failedJobs, func(i, j int) bool {
-					return failedJobs[i].Status.CompletionTime.After(failedJobs[j].Status.CompletionTime.Time)
-				})
-
-				for _, job := range failedJobs[20:] {
-					// we ignore the error in this case because we do not want to fail the job manager
-					clientset.BatchV1().Jobs(job.Namespace).Delete(context.Background(), job.Name, metav1.DeleteOptions{})
-				}
-			}
-
-			if len(succeededJobs) > 20 {
-				sort.SliceStable(succeededJobs, func(i, j int) bool {
-					return succeededJobs[i].Status.CompletionTime.After(succeededJobs[j].Status.CompletionTime.Time)
-				})
-
-				for _, job := range succeededJobs[20:] {
-					// we ignore the error in this case because we do not want to fail the job manager
-					clientset.BatchV1().Jobs(job.Namespace).Delete(context.Background(), job.Name, metav1.DeleteOptions{})
-				}
-			}
-		}(jobs)
-	}
-
-	wg.Wait()
 
 	log.Println("deleted older job runs, if any")
 
