@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.1.7-experimental
 
 # Environment to build manager binary
-FROM golang:1.15.6-alpine3.12 as build
+FROM golang:1.19-alpine3.16 as build
 WORKDIR /porter
 
 RUN apk update && apk add gcc musl-dev
@@ -15,7 +15,7 @@ RUN go build -ldflags '-w -s' -a -o ./bin/manager ./cmd/manager
 
 # Deployment environment
 # ----------------------
-FROM alpine:3.12
+FROM alpine:3.16
 WORKDIR /porter
 
 RUN apk update && apk add git
