@@ -15,10 +15,10 @@ RUN go build -ldflags '-w -s' -a -o ./bin/manager ./cmd/manager
 
 # Deployment environment
 # ----------------------
-FROM alpine:3.12
+FROM debian:bullseye-slim as runner
 WORKDIR /porter
 
-RUN apk update && apk add git
+RUN apt-get update && apt-get install -y git && apt-get clean
 
 COPY --from=build /porter/bin/manager /usr/bin/
 
